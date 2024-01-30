@@ -1,3 +1,4 @@
+========================================================================================================================================
 import sys
 import boto3
 from datetime import datetime
@@ -64,7 +65,7 @@ def create_stage_deltalake_tbl(df, s3_path):
 
 def employee_capture_changes(stage_tbl, base_tbl):
     """
-    This function will identify changes between source data and target deltalake dataset.
+    This function will identify chnages between source data and target deltalake dataset.
 
     """
     # join base and stage tables to identify updates
@@ -162,3 +163,30 @@ def employees_scd(raw_s3_path, stage_s3_path, processed_s3_path):
 
 
 employees_scd(raw_s3_path, stage_s3_path, processed_s3_path)
+==============================================================================================================================================
+
+Parameters for configuration delta lake
+==============================================================================================================================================
+Key                                             Value
+--conf                                          spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension  
+                                               --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog      
+
+
+--datalake-formats                               delta
+
+--dbname                                         default
+
+
+--enable-s3-parquet-optimized-committer            true
+
+--processed_s3_bucket_name                      scd-blog-processed-7ab5c800
+
+--processed_s3_prefix                             employee/
+
+--raw_s3_path                                   s3://scd-blog-landing-7ab5c800/dataset/employee/  
+
+--stage_s3_path                                  s3://scd-blog-landing-7ab5c800/stage/employee/
+
+--tblname                                         deltalake_stg_emp_tbl
+
+==============================================================================================================================================
