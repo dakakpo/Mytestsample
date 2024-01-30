@@ -1,0 +1,93 @@
+import sys
+import boto3
+from datetime import datetime
+from awsglue.transforms import *
+from delta.tables import *
+from pyspark.sql.functions import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+
+# Initialize Spark and Glue Contexts
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+
+# Argument parsing
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'raw_s3_path', 'stage_s3_path', 'processed_s3_bucket_name', 
+                                     'processed_s3_prefix', 'jobrole_raw_s3_path', 'jobrole_processed_s3_path'])
+
+# Extracting Parameters
+cdc_date = datetime.now().strftime("%d/%m/%Y")
+raw_s3_path = args['raw_s3_path']
+stage_s3_path = args['stage_s3_path']
+processed_s3_bucket_name = args['processed_s3_bucket_name']
+processed_s3_prefix = args['processed_s3_prefix']
+processed_s3_path = f"s3://{processed_s3_bucket_name}/{processed_s3_prefix}"
+jobrole_raw_s3_path = args['jobrole_raw_s3_path']
+jobrole_processed_s3_path = f"{processed_s3_path}/jobrole"
+
+def s3_object_cnt(bucket_name, prefix):
+    """ Returns object count in specified s3 prefix. """
+    s3_resource = boto3.resource('s3')
+    bucket = s3_resource.Bucket(bucket_name)
+    count = sum(1 for _ in bucket.objects.filter(Prefix=prefix))
+    print(f'Object count in {bucket_name}/{prefix} is {count}')
+    return count
+
+def add_emp_key(df):
+    """ Generates hash key using sha2 and adds new column emp_key to dataframe. """
+    return df.withColumn("emp_key", sha2(concat_ws("||", 
+               col("emp_id"), col("first_name"), col("last_name"), col("Address"), 
+               col("phone_number"), col("isContractor")), 256))
+
+def create_deltalake_tbl(df, s3_path):
+    """ Writes dataframe to S3 in deltalake format. """
+    df.write.format("delta").mode("append").save(s3_path)
+
+def convert_to_deltalake(df, s3_path):
+    """ Writes any dataframe to S3 in deltalake format. """
+    df.write.format("delta").mode("overwrite").save(s3_path)
+
+def process_jobrole_table():
+    """ Reads JobRole table from S3 and converts to Delta Lake format. """
+    jobrole_df = spark.read.format("csv").option("header", "true").load(jobrole_raw_s3_path)
+    convert_to_deltalake(jobrole_df, jobrole_processed_s3_path)
+
+def create_stage_deltalake_tbl(df, s3_path):
+    """ Overwrites existing data in s3 prefix and writes dataframe to S3 in deltalake format. """
+    df.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(s3_path)
+    return DeltaTable.forPath(spark, s3_path)
+
+# [Function definitions for employee_capture_changes, employee_delta_records, and employee_upsert_records go here]
+
+def employees_scd(raw_s3_path, stage_s3_path, processed_s3_path):
+    """ Performs SCD type 2 on deltalake dataset on s3 for employees dataset. """
+    srcDyf = glueContext.create_dynamic_frame.from_options(format_options={"multiline": False}, 
+                                                           connection_type="s3", format="json", 
+                                                           connection_options={"paths": [raw_s3_path], 
+                                                           "recurse": True}, transformation_ctx="srcDyf")
+
+    srcDF = add_emp_key(srcDyf.toDF())
+
+    if s3_object_cnt(processed_s3_bucket_name, processed_s3_prefix) != 0:
+        print('Deltalake employees data already exists. Started loading data...')
+        stage_tbl = create_stage_deltalake_tbl(srcDF, stage_s3_path)
+        base_tbl = DeltaTable.forPath(spark, processed_s3_path)
+        base_tbl_df = base_tbl.toDF().where((col('isCurrent') == "true") & (col('delete_flag') == "false"))
+
+        union_updates_dels = employee_capture_changes(stage_tbl, base_tbl_df)
+        employee_delta_records(base_tbl, union_updates_dels)
+        base_tbl = DeltaTable.forPath(spark, processed_s3_path)
+        employee_upsert_records(base_tbl, union_updates_dels)
+    else:
+        print('Delta lake employees data does not exist. Performing initial data load...')
+        srcDF = srcDF.withColumn("start_date", current_date()).withColumn("end_date", lit(None).cast(StringType()))\
+                    .withColumn("isCurrent", lit(True)).withColumn("delete_flag", lit(False))
+        create_deltalake_tbl(srcDF, processed_s3_path)
+
+# Execution
+process_jobrole_table()
+employees_scd(raw_s3_path, stage_s3_path, processed_s3_path)
