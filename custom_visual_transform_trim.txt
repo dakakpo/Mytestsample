@@ -1,0 +1,28 @@
+=================== trim.py ========================================================================
+from awsglue import DynamicFrame
+
+def trim(self, colName):
+    # Apply the trim function to the column
+    return self.apply_mapping([(colName, "string", colName, "string", lambda x: x.strip())])
+
+# Register the function to be used in DynamicFrame
+DynamicFrame.trim = trim
+
+===================== trim.json ===================================================================================
+{
+    "name": "trim",
+    "displayName": "Trim",
+    "description": "A custom visual transform to trim leading and trailing spaces from a column",
+    "functionName": "trim",
+    "parameters": [
+        {
+            "name": "colName",
+            "displayName": "Column name",
+            "type": "str",
+            "description": "Name of the column to trim"
+        }
+    ]
+}
+============================================================================================================
+
+
