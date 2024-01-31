@@ -23,6 +23,60 @@ DynamicFrame.trim = trim
         }
     ]
 }
-============================================================================================================
+==================== Testing data ========================================================================================
+
+Let’s say you have a table called customers with the following data:
+
+Table
+
+id	name	        email
+1	John Smith	john.smith@example.com
+2	Jane Doe	jane.doe@example.com
+3	Bob Lee 	bob.lee@example.com
+4	Alice Wong	alice.wong@example.com
+
+You want to trim the leading and trailing spaces from the name column using your custom visual transform. To do that, you need to:
+
+Create a DynamicFrame from the table using the from_catalog method1.
+Apply the trim function to the name column using the trim method you defined earlier.
+Convert the DynamicFrame back to a table using the toDF method2.
+Display the result using the show method3.
+The code for this would look something like this:
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# Import the required modules
+from awsglue.dynamicframe import DynamicFrame
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+
+# Create a Glue context
+glueContext = GlueContext(SparkContext.getOrCreate())
+
+# Create a DynamicFrame from the customers table
+df = glueContext.create_dynamic_frame.from_catalog(database="my_database", table_name="customers")
+
+# Apply the trim function to the name column
+df = df.trim("name")
+
+# Convert the DynamicFrame to a table
+df = df.toDF()
+
+# Display the result
+df.show()
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+The output of this code would be:
+
+Table
+
+id	name	        email
+1	John Smith	john.smith@example.com
+2	Jane Doe	jane.doe@example.com
+3	Bob Lee	        bob.lee@example.com
+4	Alice Wong	alice.wong@example.com
+
+As you can see, the leading and trailing spaces from the name column have been removed.
+
+
 
 
