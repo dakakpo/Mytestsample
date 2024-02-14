@@ -1,0 +1,141 @@
+From awsglue.context import GlueContext
+From awsglue.dynamicframe import DynamicFrame
+From awsglue.transforms import *
+From pyspark.context import SparkContext
+From pyspark.sql import SparkSession
+ 
+# Initialize GlueContext
+glueContext = GlueContext(SparkContext.getOrCreate())
+ 
+spark = SparkSession.builder.appName(“example”).getOrCreate()
+ 
+# Define your RDS connection options
+Rds_connection_options = {
+   “url”: “jdbc:mysql://your-rds-endpoint:3306/your_database”,
+   “dbtable”: “your_table”,
+   “user”: “your_username”,
+   “password”: “your_password”,
+   “customJdbcDriverS3Path”: “s3://your-s3-bucket/path/to/mysql-connector-java-8.0.23.jar”  # Provide the path to your MySQL JDBC driver
+}
+ 
+# Define your Redshift connection options
+Redshift_connection_options = {
+   “url”: “jdbc:redshift://your-redshift-endpoint:5439/your_database”,
+   “dbtable”: “your_target_table”,
+   “user”: “your_redshift_username”,
+   “password”: “your_redshift_password”,
+   “postactions”: [“VACUUM ANALYZE your_target_table;”]  # Optional: Vacuum and analyze the table after loading
+}
+ 
+ 
+ 
+ 
+Def create_dataframe(db_name,table_name)
+# Read data from RDS
+   Rds_data_frame = glueContext.create_dynamic_frame.from_catalog(
+       Database=db_name,
+       Table_name=table_name,
+       Transformation_ctx=”rds_dynamic_frame”
+   ).toDF()
+   Return rds_data_frame
+ 
+# Convert the dynamic frame to a Spark DataFrame for SCD Type 2 processing
+ 
+ 
+Rds_TIDDOHOF_df =  create_dataframe (“rds_db”,”TIDDOHOF”)
+Rds_TIDDRHOF_df =  create_dataframe (“rds_db”,”TIDDOHOF”)
+Rds_TIDENADL_df =  create_dataframe (“rds_db”,”TIDDOHOF”)
+Redshift_CHANGE_DOC_LST_df = create_dataframe (“redshift_db”,”CHANGE_DOC_LST”)
+ 
+Rds_TIDDOHOF_df.createOrReplaceTempView(“TIDDOHOF_view”)
+Rds_TIDDRHOF_df.createOrReplaceTempView(“TIDDRHOF_view”)
+Rds_TIDENADL_df.createOrReplaceTempView(“TIDENADL_view”)
+Redshift_CHANGE_DOC_LST_df.createOrReplaceTempView(“CHANGE_DOC_LST_view”)
+ 
+Insert_flag_df = spark.sql(“””
+Select src.*,
+Current_timestamp() as etl_insrt_dttm,
+Null as etl_upd_dttm
+From
+(select md5(ec_number||ec_revision||facility||document_type||document_sub_type||document_nbr||doc_sheet_nbr||adl_occur_flag) as Affctd_doc_id,
+*
+From CHANGE_DOC_LST_view) tgt
+Left join (select md5(ec_number||ec_revision||facility||document_type||document_sub_type||document_nbr||doc_sheet_nbr||adl_occur_flag) as Affctd_doc_id,* from TIDENADL_view)src
+On tgt.Affctd_doc_id = src.Affctd_doc_id
+Where src.non_key_columns is null”””)
+ 
+Delete_flag_df = spark.sql(“””
+Select tgt.Affctd_doc_id from
+(select md5(ec_number||ec_revision||facility||document_type||document_sub_type||document_nbr||doc_sheet_nbr||adl_occur_flag) as Affctd_doc_id,*
+From CHANGE_DOC_LST_view) tgt
+Where tgt.Affctd_doc_id not in (select md5(ec_number||ec_revision||facility||document_type||document_sub_type||document_nbr||doc_sheet_nbr||adl_occur_flag) as Affctd_doc_id,* from TIDENADL_view)
+“””)
+ 
+Update_flag_df = spark.sql(“””
+Select src.*,
+--add required transformation in this query
+Current_timestamp() as etl_insrt_dttm,
+Null as etl_upd_dttm
+From
+(select md5(ec_number||ec_revision||facility||document_type||document_sub_type||document_nbr||doc_sheet_nbr||adl_occur_flag) as Affctd_doc_id,
+*
+From CHANGE_DOC_LST_view) tgt
+Left join (select md5(ec_number||ec_revision||facility||document_type||document_sub_type||document_nbr||doc_sheet_nbr||adl_occur_flag) as Affctd_doc_id,* from TIDENADL_view)src
+On tgt.Affctd_doc_id = src.Affctd_doc_id
+Where src.non_key_columns is not null”””)
+ 
+ 
+#ids_to_be_deleted_df = delete_flag_df.union(update_flag_df)
+ 
+ 
+Update_result_string = “,”.join(delete_flag_df.select(“Affctd_doc_id”).rdd.map(lambda x: x[0]).collect())
+ 
+Update_query_to_set_delete_flag = “””update CHANGE_DOC_LST set del_flag = ‘True’ where Affctd_doc_id in (‘+{result_string}+’)”””.format(update_result_string)
+ 
+Spark.read \
+   .format(“jdbc”) \
+   .option(“url”, redshift_connection_options[“url”]) \
+   .option(“dbtable”, f”({update_query_to_set_delete_flag}) AS query”) \
+   .option(“user”, redshift_connection_options[“user”]) \
+   .option(“password”, redshift_connection_options[“password”]) \
+   .option(“driver”, “com.amazon.redshift.jdbc42.Driver”) \
+   .load()
+ 
+ 
+Dyf_update_flag = DynamicFrame.fromDF(update_flag_df,glueContext,”dyf_update_flag”
+ 
+glueContext.write_dynamic_frame.from_catalog(
+   frame = dyf_update_flag,
+   database = redshift_connection_options[“redshift_db”],
+   table_name = redshift_connection_options[“CHANGE_DOC_LST”],
+   redshift_tmp_dir = redshift_connection_options[“redshift_tmp_dir”]
+)
+ 
+ 
+Update_query_to_end_timestamp = “””UPDATE CHANGE_DOC_LST as CDL
+ SET etl_upd_dttm = (
+     SELECT etl_insrt_dttm
+     FROM (
+       SELECT *
+         ,row_number() OVER (
+           PARTITION BY Affctd_doc_id ORDER BY etl_insrt_dttm DESC
+           ) AS row_num
+       FROM CHANGE_DOC_LST
+       WHERE etl_insrt_dttm IS NULL
+         AND emp_rec_version <> 1
+       ) AS B
+     WHERE B.row_num = 1
+       AND CDL.Affctd_doc_id = B.Affctd_doc_id
+     )
+ WHERE etl_upd_dttm IS NULL”””
+ 
+ 
+Spark.read \
+.format(“jdbc”) \
+.option(“url”, redshift_connection_options[“url”]) \
+.option(“dbtable”, f”({update_query_to_end_timestamp}) AS query”) \
+.option(“user”, redshift_connection_options[“user”]) \
+.option(“password”, redshift_connection_options[“password”]) \
+.option(“driver”, “com.amazon.redshift.jdbc42.Driver”) \
+.load()
+ 
