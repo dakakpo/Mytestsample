@@ -1,0 +1,87 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when, lit, unix_timestamp, current_date
+
+# Create a SparkSession
+spark = SparkSession.builder.appName("SCD2").getOrCreate()
+
+# Load the data
+tidcnmst = spark.read.parquet("tidcnmst.parquet")
+tidcnreq = spark.read.parquet("tidcnreq.parquet")
+auditlogcontrol = spark.read.parquet("auditlogcontrol.parquet")
+
+# Get the last ETL timestamp from the auditlogcontrol table
+last_etl_timestamp = auditlogcontrol.select("load_end_time").orderBy("load_end_time", ascending=False).first()[0]
+
+# Filter the source tables for records updated after the last ETL timestamp
+tidcnmst = tidcnmst.filter(col("timestamp") > last_etl_timestamp)
+tidcnreq = tidcnreq.filter(col("timestamp") > last_etl_timestamp)
+
+# Register the DataFrames as SQL temporary views
+tidcnmst.createOrReplaceTempView("tidcnmst")
+tidcnreq.createOrReplaceTempView("tidcnreq")
+auditlogcontrol.createOrReplaceTempView("auditlogcontrol")
+
+# Join tidcnmst and tidcnreq to create the contract table
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW contract AS
+    SELECT *
+    FROM tidcnmst
+    JOIN tidcnreq
+    ON tidcnmst.contract_id = tidcnreq.contract_id
+    AND tidcnmst.contr_requisition = tidcnreq.contr_requisition
+""")
+
+# Implement SCD2
+# Load the existing data in the contract table
+existing_data = spark.read.parquet("contract.parquet")
+existing_data.createOrReplaceTempView("existing_data")
+
+# Find the new and updated records
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW new_and_updated_records AS
+    SELECT *
+    FROM contract
+    LEFT ANTI JOIN existing_data
+    USING (cntrct_id, cntrct_reles_nbr, cntrct_reqstn_nbr, addr_bill_cd, addr_cd)
+""")
+
+# Find the records to be updated in the existing data
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW records_to_update AS
+    SELECT *
+    FROM existing_data
+    JOIN new_and_updated_records
+    USING (cntrct_id, cntrct_reles_nbr, cntrct_reqstn_nbr, addr_bill_cd, addr_cd)
+""")
+
+# Update the end_date for the records to be updated and set delflag to true
+updated_existing_data = existing_data.withColumn("enddate", when(col("cntrct_id").isin(records_to_update.select("cntrct_id").rdd.flatMap(lambda x: x).collect()), current_date()).otherwise(to_date(lit('9999-12-31')))).withColumn("delflag", when(col("cntrct_id").isin(records_to_update.select("cntrct_id").rdd.flatMap(lambda x: x).collect()), lit(True)).otherwise(lit(False)))
+
+# Append the new and updated records to the existing data with startdate as current date, enddate as '9999-12-31', and delflag as false
+new_and_updated_records.withColumn("startdate", current_date()).withColumn("enddate", to_date(lit('9999-12-31'))).withColumn("delflag", lit(False)).write.parquet("contract.parquet", mode="append")
+
+# Implement delete
+# Find the records that have been deleted in the source
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW deleted_records AS
+    SELECT *
+    FROM existing_data
+    LEFT ANTI JOIN contract
+    USING (cntrct_id, cntrct_reles_nbr, cntrct_reqstn_nbr, addr_bill_cd, addr_cd)
+""")
+
+# Update the end_date for the deleted records and set delflag to true
+final_data = updated_existing_data.withColumn("enddate", when(col("cntrct_id").isin(deleted_records.select("cntrct_id").rdd.flatMap(lambda x: x).collect()), current_date()).otherwise(col("enddate"))).withColumn("delflag", when(col("cntrct_id").isin(deleted_records.select("cntrct_id").rdd.flatMap(lambda x: x).collect()), lit(True)).otherwise(col("delflag")))
+
+# Write the final data back to the contract table
+final_data.write.parquet("contract.parquet", mode="overwrite")
+
+# Update the auditlogcontrol table
+insert_count = new_and_updated_records.count()
+update_count = records_to_update.count()
+delete_count = deleted_records.count()
+
+auditlogcontrol = auditlogcontrol.union(spark.createDataFrame([(batch_id, project_name, job_name, database_name, schema_name, 'contract', source_timestamp, insert_count, update_count, reject_record_count, job_status, error_msg, load_begin_time, unix_timestamp(), delete_count, unix_timestamp())], auditlogcontrol.schema))
+
+# Write the updated auditlogcontrol table back to disk
+auditlogcontrol.write.parquet("auditlogcontrol.parquet", mode="overwrite")
