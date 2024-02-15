@@ -1,0 +1,87 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when, lit, unix_timestamp, current_date
+
+# Create a SparkSession
+spark = SparkSession.builder.appName("SCD2").getOrCreate()
+
+# Load the data
+tidcnmst = spark.read.format("delta").load("tidcnmst.delta")
+tidcnreq = spark.read.format("delta").load("tidcnreq.delta")
+auditlogcontrol = spark.read.format("delta").load("auditlogcontrol.delta")
+
+# Register the DataFrames as SQL temporary views
+tidcnmst.createOrReplaceTempView("tidcnmst")
+tidcnreq.createOrReplaceTempView("tidcnreq")
+auditlogcontrol.createOrReplaceTempView("auditlogcontrol")
+
+# Join tidcnmst and tidcnreq to create the contract table
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW contract AS
+    SELECT *
+    FROM tidcnmst
+    JOIN tidcnreq
+    ON tidcnmst.contract_id = tidcnreq.contract_id
+    AND tidcnmst.contr_requisition = tidcnreq.contr_requisition
+""")
+
+# Implement SCD2
+# Load the existing data in the contract table
+existing_data = spark.read.format("delta").load("contract.delta")
+existing_data.createOrReplaceTempView("existing_data")
+
+# Find the new and updated records
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW new_and_updated_records AS
+    SELECT *
+    FROM contract
+    LEFT ANTI JOIN existing_data
+    USING (cntrct_id, cntrct_reles_nbr, cntrct_reqstn_nbr, addr_bill_cd, addr_cd)
+""")
+
+# Find the records to be updated in the existing data
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW records_to_update AS
+    SELECT *
+    FROM existing_data
+    JOIN new_and_updated_records
+    USING (cntrct_id, cntrct_reles_nbr, cntrct_reqstn_nbr, addr_bill_cd, addr_cd)
+""")
+
+# Update the end_date for the records to be updated and set delflag to 1
+spark.sql("""
+    MERGE INTO existing_data
+    USING records_to_update
+    ON existing_data.cntrct_id = records_to_update.cntrct_id
+    WHEN MATCHED THEN
+    UPDATE SET
+    existing_data.enddate = unix_timestamp(),
+    existing_data.delflag = 1
+""")
+
+# Append the new and updated records to the existing data with startdate as current date and delflag as 0
+new_and_updated_records.withColumn("startdate", current_date()).withColumn("enddate", lit(None)).withColumn("delflag", lit(0)).write.format("delta").mode("append").save("contract.delta")
+
+# Implement delete
+# Find the records that have been deleted in the source
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW deleted_records AS
+    SELECT *
+    FROM existing_data
+    LEFT ANTI JOIN contract
+    USING (cntrct_id, cntrct_reles_nbr, cntrct_reqstn_nbr, addr_bill_cd, addr_cd)
+""")
+
+# Update the end_date for the deleted records and set delflag to 1
+spark.sql("""
+    MERGE INTO existing_data
+    USING deleted_records
+    ON existing_data.cntrct_id = deleted_records.cntrct_id
+    WHEN MATCHED THEN
+    UPDATE SET
+    existing_data.enddate = unix_timestamp(),
+    existing_data.delflag = 1
+""")
+
+# Write the final data back to the contract table
+final_data = spark.table("existing_data")
+final_data.write.format("delta").mode("overwrite").save("contract.delta")
