@@ -1,0 +1,64 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import current_date
+from delta.tables import DeltaTable
+
+# Initialize Spark Session with Delta Lake support
+spark = SparkSession.builder.appName("SCD Type 2 and Load to Redshift") \
+    .config("spark.jars.packages", "io.delta:delta-core_2.12:0.8.0,com.databricks:spark-redshift_2.12:4.2.0,org.postgresql:postgresql:42.2.9") \
+    .enableHiveSupport() \
+    .getOrCreate()
+
+# Load incremental and existing data
+tidcnmst_df = spark.read.format("delta").load("s3://path/to/tidcnmst")
+tidcnreq_df = spark.read.format("delta").load("s3://path/to/tidcnreq")
+contract_df = spark.read.format("delta").load("s3://path/to/contract")
+
+# Prepare the incremental update DataFrame
+incremental_updates = tidcnmst_df.join(tidcnreq_df, ["contract_id", "contract_release", "contr_requisition", "address_code"], "inner")\
+                                 .selectExpr(
+                                     "contract_id as cntrct_id",
+                                     "contract_release as cntrct_reles_nbr",
+                                     "contr_requisition as cntrct_reqstn_nbr",
+                                     "address_code_bill as addr_bill_cd",
+                                     "address_code as addr_cd"
+                                 )
+
+# Ensure the contract table is a Delta table
+DeltaTable.convertToDelta(spark, "parquet.`s3://path/to/contract`")
+
+# Create a DeltaTable object for the existing contract data
+deltaTable = DeltaTable.forPath(spark, "s3://path/to/contract")
+
+# Apply SCD Type 2 logic using Delta Lake's merge operation
+(deltaTable.alias("contract")
+    .merge(
+        incremental_updates.alias("updates"),
+        "contract.cntrct_id = updates.cntrct_id")
+    .whenMatchedUpdateAll(  # For updates
+        condition="contract.cntrct_id = updates.cntrct_id AND (contract.cntrct_reles_nbr <> updates.cntrct_reles_nbr OR contract.addr_bill_cd <> updates.addr_bill_cd OR contract.addr_cd <> updates.addr_cd)"
+    )
+    .whenNotMatchedInsertAll()  # For inserts
+    .execute()
+)
+
+# Define Redshift JDBC URL and connection properties
+redshift_jdbc_url = "jdbc:redshift://<redshift-cluster-endpoint>:5439/<database-name>"
+connection_properties = {
+    "user": "<username>",
+    "password": "<password>",
+    "driver": "com.amazon.redshift.jdbc.Driver"
+}
+
+# Specify the S3 bucket for intermediate data
+temp_s3_dir = "s3://<your-temp-bucket>/temp-dir"
+
+# Write the updated DataFrame to Redshift
+contract_df = DeltaTable.forPath(spark, "s3://path/to/contract").toDF()
+contract_df.write \
+    .format("com.databricks.spark.redshift") \
+    .option("url", redshift_jdbc_url) \
+    .option("tempdir", temp_s3_dir) \
+    .option("dbtable", "<target-redshift-table>") \
+    .option("forward_spark_s3_credentials", "true") \
+    .mode("append") \
+    .save()
