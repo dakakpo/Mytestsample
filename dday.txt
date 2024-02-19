@@ -1,0 +1,55 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import trim, col
+
+# Initialize Spark Session with Delta Lake support
+spark = SparkSession.builder.appName("SCD Type 2 Efficient")\
+    .config("spark.jars.packages", "io.delta:delta-core_2.12:0.8.0")\
+    .enableHiveSupport().getOrCreate()
+
+# Load incremental and existing data
+tidcnmst_df = spark.read.format("delta").load("s3://path/to/tidcnmst")
+tidcnreq_df = spark.read.format("delta").load("s3://path/to/tidcnreq")
+# This line assumes the contract table is already in Delta format.
+# If it's not, you'll need to convert or create it differently.
+contract_df = spark.read.format("delta").load("s3://path/to/contract")
+
+# Prepare the incremental update DataFrame
+# Corrected the join condition and fixed the syntax for using trim and col functions
+incremental_updates = tidcnmst_df.join(tidcnreq_df, tidcnmst_df["contract_id"] == tidcnreq_df["contract_id"], "inner")\
+          .select(
+              trim(col("tidcnmst_df.contract_id")).alias("cntrct_id"),
+              trim(col("tidcnmst_df.contract_release")).alias("cntrct_reles_nbr"),
+              trim(col("tidcnreq_df.contr_requisition")).alias("cntrct_reqstn_nbr"),
+              trim(col("tidcnmst_df.address_code_bill")).alias("addr_bill_cd"),
+              trim(col("tidcnmst_df.address_code")).alias("addr_cd")
+          )
+
+# DeltaTable for PySpark
+from delta.tables import DeltaTable
+
+# Ensure the contract table is already a Delta table
+# Ensure the contract table is a Delta table
+DeltaTable.convertToDelta(spark, "parquet.`s3://path/to/contract`")
+
+# Create a DeltaTable object for the existing contract data
+deltaTable = DeltaTable.forPath(spark, "s3://path/to/contract")
+# The convertToDelta function is useful if you're converting from Parquet to Delta.
+# If the table is already Delta, this step is not needed.
+# DeltaTable.convertToDelta(spark, "parquet.`s3://path/to/contract`")
+
+# Create a DeltaTable object for the existing contract data
+deltaTable = DeltaTable.forPath(spark, "s3://path/to/contract")
+
+# Apply SCD Type 2 logic using Delta Lake's merge operation
+(deltaTable.alias("contract")
+    .merge(
+        incremental_updates.alias("updates"),
+        "contract.cntrct_id = updates.cntrct_id")  # Ensure this is the correct join condition
+    .whenMatchedUpdateAll(  # For updates
+        condition="""(contract.cntrct_reles_nbr <> updates.cntrct_reles_nbr OR 
+                       contract.addr_bill_cd <> updates.addr_bill_cd OR 
+                       contract.addr_cd <> updates.addr_cd)"""
+    )
+    .whenNotMatchedInsertAll()  # For inserts
+    .execute()
+)
