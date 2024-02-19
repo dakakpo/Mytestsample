@@ -1,0 +1,52 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, trim
+from delta.tables import DeltaTable
+
+# Initialize Spark Session with Delta Lake support
+spark = SparkSession.builder.appName("SCD Type 2 ETL") \
+    .config("spark.jars.packages", "io.delta:delta-core_2.12:1.0.0") \
+    .enableHiveSupport() \
+    .getOrCreate()
+
+# Define the paths to your datasets
+path_to_tidcnmst = "s3://path/to/tidcnmst"
+path_to_tidcnreq = "s3://path/to/tidcnreq"
+path_to_contract = "s3://path/to/contract"
+
+# Load incremental data frames
+tidcnmst_df = spark.read.format("delta").load(path_to_tidcnmst)
+tidcnreq_df = spark.read.format("delta").load(path_to_tidcnreq)
+
+# Prepare the incremental update DataFrame by joining and selecting necessary columns
+incremental_updates = tidcnmst_df.join(tidcnreq_df, tidcnmst_df["contract_id"] == tidcnreq_df["contract_id"], "inner") \
+    .select(
+        trim(col("tidcnmst_df.contract_id")).alias("cntrct_id"),
+        trim(col("tidcnmst_df.contract_release")).alias("cntrct_reles_nbr"),
+        trim(col("tidcnreq_df.contr_requisition")).alias("cntrct_reqstn_nbr"),
+        trim(col("tidcnmst_df.address_code_bill")).alias("addr_bill_cd"),
+        trim(col("tidcnmst_df.address_code")).alias("addr_cd")
+    )
+
+# Check if the contract table exists and has data to determine process flow
+try:
+    deltaTable = DeltaTable.forPath(spark, path_to_contract)
+    table_exists = True
+except:
+    table_exists = False
+
+# Process flow: initial load or incremental updates based on the existence of the contract table
+if table_exists:
+    # Apply SCD Type 2 logic using Delta Lake's merge operation
+    deltaTable.alias("existing").merge(
+        source=incremental_updates.alias("updates"),
+        condition="existing.cntrct_id = updates.cntrct_id"
+    ).whenMatchedUpdateAll(
+        condition="""(existing.cntrct_reles_nbr <> updates.cntrct_reles_nbr OR 
+                       existing.addr_bill_cd <> updates.addr_bill_cd OR 
+                       existing.addr_cd <> updates.addr_cd)"""
+    ).whenNotMatchedInsertAll().execute()
+else:
+    # If the contract table doesn't exist, perform initial load
+    incremental_updates.write.format("delta").mode("overwrite").save(path_to_contract)
+
+print("ETL process completed.")
