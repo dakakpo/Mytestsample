@@ -1,0 +1,23 @@
+max_timestamp = etl_wam_job_control_logDF.filter(etl_wam_job_control_logDF.target_table_name == 'contract').agg(max_function("load_begin_datetime")).collect()[0][0]
+
+# If max_timestamp is None, set it to a default value
+if max_timestamp is None:
+    max_timestamp = spark.sql("select to_timestamp('1900-01-01 00:00:00', 'yyyy-mm-dd hh24:mi:ss')").collect()[0][0]
+
+
+# Filter tidcnmst and tidcnreq based on the timestamp
+tidcnmst_df = tidcnmstDF.filter(tidcnmstDF.time_stamp > max_timestamp)
+tidcnreq_df = tidcnmstDF.filter(tidcnmstDF.time_stamp > max_timestamp)
+
+using pyspark with delta lake format 
+task1 -build contract table as  the transformation and join operation of tidcnmstDF and tidcnreqDF
+         contract = tidcnmstDF.join(tidcnreqDF, tidcnmstDF["contract_id"] == tidcnreqDF["contract_id"], "inner")\
+          .select(
+              trim(col("tidcnmstDF.contract_id")).alias("cntrct_id"),
+              trim(col("tidcnmstDF.contract_release")).alias("cntrct_reles_nbr"),
+              trim(col("tidcnreqDF.contr_requisition")).alias("cntrct_reqstn_nbr"),
+              trim(col("tidcnmstDF.address_code_bill")).alias("addr_bill_cd"),
+              trim(col("tidcnmstDF.address_code")).alias("addr_cd")
+          )
+
+task2 -apply scd2 with eff-start-date, eff-end-date(9999-12-31) on contract table based on new inserts and updated records
