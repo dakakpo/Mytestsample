@@ -1,0 +1,61 @@
+
+Tables in PostgreSQL has columns
+tidcnmst
+contract_id (Primary Key)
+contract_release
+contr_requisition
+address_code_bill
+address_code
+Time_stamp
+
+tidcnreq has columns
+contr_requisition (Primary Key)
+contract_release
+contract_id
+address_type
+address_code
+Time_stamp
+
+Log Table in Redshift etl_wam_job_control_log (schema named wam_audit) has columns
+Batch_id (Primary Key)
+Project_name
+Job_name
+Database_name
+Schema_name
+Target_table_name
+Source_timestamp
+Insert_record_count
+Update_record_count
+Reject_record_count
+Job_status
+Error_msg
+Load_begin_datetime
+Load_end_datetime
+Delete_record_count
+Delete_end_datetime
+
+Target contract has columns
+contract (Assumed structure based on transformation requirements)
+cntrct_id (Derived from tidcnmst.contract_id)
+cntrct_reles_nbr (Derived from tidcnmst.contract_release)
+cntrct_reqstn_nbr (Derived from tidcnmst.contr_requisition)
+addr_bill_cd (Derived from tidcnmst.address_code_bill)
+addr_cd (Derived from tidcnmst.address_code)
+
+
+
+if the record is a new insert set eff_start_date to current date, eff_end_date to 9999-12-31
+if its an update add a new row, set eff_end_date to 9999-12-31, eff_start_date to current, 
+
+
+task1 -build contract table if not exist and apply scd2 with eff-start-date, eff-end-date(9999-12-31) 
+         contract = tidcnmstDF.join(tidcnreqDF, tidcnmstDF["contract_id"] == tidcnreqDF["contract_id"], "inner")\
+          .select(
+              trim(col("tidcnmstDF.contract_id")).alias("cntrct_id"),
+              trim(col("tidcnmstDF.contract_release")).alias("cntrct_reles_nbr"),
+              trim(col("tidcnreqDF.contr_requisition")).alias("cntrct_reqstn_nbr"),
+              trim(col("tidcnmstDF.address_code_bill")).alias("addr_bill_cd"),
+              trim(col("tidcnmstDF.address_code")).alias("addr_cd")
+          )
+
+task2 -apply scd2 with eff-start-date, eff-end-date(9999-12-31) on contract table based on new inserts and updated records from tidcnmst_df and tidcnreq_df
