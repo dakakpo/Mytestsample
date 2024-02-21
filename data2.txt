@@ -1,0 +1,36 @@
+tidcnmst_df.createOrReplaceTempView("tidcnmst")
+tidcnreq_df.createOrReplaceTempView("tidcnreq")
+etl_log_df.createOrReplaceTempView("etl_log")
+
+
+latest_etl_timestamp_df = spark.sql("""
+SELECT COALESCE(MAX(Load_end_datetime), CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AS latest_timestamp
+FROM etl_log
+WHERE Target_table_name = 'contract'
+""")
+
+latest_etl_timestamp = latest_etl_timestamp_df.collect()[0]['latest_timestamp']
+
+
+from pyspark.sql.functions import col, lit
+
+# Filter new records in tidcnmst and tidcnreq DataFrames
+new_tidcnmst_df = tidcnmst_df.filter(col("Time_stamp") > lit(latest_etl_timestamp))
+new_tidcnreq_df = tidcnreq_df.filter(col("Time_stamp") > lit(latest_etl_timestamp))
+
+# Join the filtered DataFrames
+contract_df = new_tidcnmst_df.join(new_tidcnreq_df, new_tidcnmst_df.contract_id == new_tidcnreq_df.contract_id, "inner") \
+    .select(
+        new_tidcnmst_df.contract_id.alias("cntrct_id"),
+        new_tidcnmst_df.contract_release.alias("cntrct_reles_nbr"),
+        new_tidcnreq_df.contr_requisition.alias("cntrct_reqstn_nbr"),
+        new_tidcnmst_df.address_code_bill.alias("addr_bill_cd"),
+        new_tidcnmst_df.address_code.alias("addr_cd")
+    )
+
+
+from pyspark.sql.functions import current_date
+
+contract_df = contract_df \
+    .withColumn("eff_strt_dttm", current_date()) \
+    .withColumn("eff_end_dttm", lit("9999-12-31"))
